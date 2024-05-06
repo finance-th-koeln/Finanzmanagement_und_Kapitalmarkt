@@ -1,0 +1,50 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from numdifftools import Derivative
+from scipy.optimize import fsolve
+
+# Funktionen definieren
+def utility(C0, C1):
+    return C0**0.6 * C1**0.4
+
+def production(I0):
+    return 15 * I0 ** 0.5
+
+# Zinssatz abfragen
+i = float(input("Bitte geben Sie den Zins als Dezimalzahl für Budgetgerade 1 ein: "))
+j = float(input("Bitte geben Sie den Zins als Dezimalzahl für Budgetgerade 2 ein: "))
+# M0 festlegen (M1 wird als 0 angenommen)
+M0 = 50
+
+# Funktion zur Berechnung von I0 definieren
+def find_I0(I0, i):
+    return Derivative(production)(I0) - (1 + i)
+
+# I0 automatisch berechnen
+I01 = fsolve(find_I0, 1, args=(i,))[0]  # Startwert für die numerische Lösung: 1
+print("Berechnetes I01:", I01)
+
+I02 = fsolve(find_I0, 1, args=(j,))[0]  # Startwert für die numerische Lösung: 1
+print("Berechnetes I02:", I02)
+
+# Mögliche Konsumkombinationen für Budgetgerade 2 erstellen
+Y = production(I01) + (1+i)*(M0-I01)
+Y_1 = production(I02) + (1+j)*(M0-I02)
+C0 = np.linspace(0, np.maximum(Y, Y_1), 1000)
+C1 = production(I01) + (1+i)*(M0-I01-C0)
+C1_2 = production(I02) + (1+j)*(M0-I02-C0)
+# Produktionsfunktion erstellen
+E = production(M0-np.minimum(C0, M0))
+
+# Plot erstellen
+plt.figure(figsize=(8, 6))
+plt.plot(C0, E, label="Produktionsfunktion (Investitionsfunktion)", color="blue")
+plt.plot(C0, C1, label="Budgetgerade 1", color="red")
+plt.plot(C0, C1_2, label="Budgetgerade 2", color="green")
+plt.xlabel("C0")
+plt.ylabel("C1")
+plt.title("Graphische Lösung des Fisher Separationstheorems")
+plt.ylim(0, None)
+plt.legend()
+plt.grid(True)
+plt.show()
