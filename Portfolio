@@ -1,0 +1,66 @@
+# Nutzt ISINs aus einer Input-Tabelle, zieht über Yahoo-Finance 10 Jahre zurück Kurse, berechnet Log-Renditen, Korrelations- und Kovarianzmatrix und gibt alles in Output-Tabelle aus
+
+import yfinance as yf
+import pandas as pd
+from datetime import datetime
+import numpy as np
+
+# Excel-Dateipfad
+excel_file_path = r"PFAD ZUR INPUT-TABELLE\ISIN-WKN-Liste.xlsx"
+
+# Daten aus der Excel-Tabelle laden
+df = pd.read_excel(excel_file_path)
+
+# ISIN/WKN und Unternehmensnamen in ein Dictionary umwandeln
+isin_wkn = dict(zip(df['Unternehmen'], df['ISIN/WKN']))
+
+# Heute Datum
+end_date = datetime.now().strftime('%Y-%m-%d')
+
+# Startdatum vor 10 Jahren
+start_date = (datetime.now() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+
+# Daten abrufen und verarbeiten
+all_data = pd.DataFrame()
+
+for name, identifier in isin_wkn.items():
+    try:
+        # Ticker-Symbol über ISIN/WKN abrufen
+        ticker_symbol = yf.Ticker(identifier).info['symbol']
+
+        # Historische Daten abrufen
+        data = yf.download(ticker_symbol, start=start_date, end=end_date)
+
+        # Nur den Adjusted Close Preis behalten
+        data = data[['Adj Close']].rename(columns={'Adj Close': name})
+
+        # Stetige Tagesrendite berechnen
+        data[name] = np.log(data[name] / data[name].shift(1))
+
+        # Daten zum DataFrame hinzufügen
+        all_data = pd.concat([all_data, data[name]], axis=1)
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Daten für {name} mit {identifier}: {e}")
+
+# Zeitzoneninformationen aus dem Index entfernen
+if isinstance(all_data.index.dtype, pd.DatetimeTZDtype):
+    all_data.index = all_data.index.tz_localize(None)
+
+# Berechnung der Kovarianz- und Korrelationsmatrix
+cov_matrix = all_data.cov()
+corr_matrix = all_data.corr()
+
+# Ergebnisse in eine Excel-Datei schreiben
+output_file_path = r'PFAD ZUR OUTPUT-TABELLE\00_Stetige_Tagesrenditen_und_Matrizen.xlsx'
+
+with pd.ExcelWriter(output_file_path) as writer:
+    # Stetige Tagesrenditen in den Reiter "Log-Rendite" schreiben
+    all_data.to_excel(writer, sheet_name="Log-Rendite", index=True)
+
+    # Kovarianzmatrix in den Reiter "Kovarianzmatrix" schreiben
+    cov_matrix.to_excel(writer, sheet_name="Kovarianzmatrix", index=True)
+
+    # Korrelationsmatrix in den Reiter "Korrelationsmatrix" schreiben
+    corr_matrix.to_excel(writer, sheet_name="Korrelationsmatrix", index=True)
+
+print(f'Stetige Tagesrenditen, Kovarianzmatrix und Korrelationsmatrix erfolgreich gespeichert in {output_file_path}')
