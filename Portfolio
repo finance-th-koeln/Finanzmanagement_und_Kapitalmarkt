@@ -1,66 +1,274 @@
-# Nutzt ISINs aus einer Input-Tabelle, zieht über Yahoo-Finance 10 Jahre zurück Kurse, berechnet Log-Renditen, Korrelations- und Kovarianzmatrix und gibt alles in Output-Tabelle aus
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Portfoliooptimierung anhand historischer Log-Renditen (mit Yahoo Finance)
+"""
 
-import yfinance as yf
+import os
 import pandas as pd
-from datetime import datetime
 import numpy as np
+import yfinance as yf
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+import scipy.optimize as sco
 
-# Excel-Dateipfad
-excel_file_path = r"PFAD ZUR INPUT-TABELLE\ISIN-WKN-Liste.xlsx"
+# 1. Benutzerabfragen
+print("=== Portfoliooptimierung basierend auf ISIN-Liste und Yahoo Finance ===\n")
 
-# Daten aus der Excel-Tabelle laden
-df = pd.read_excel(excel_file_path)
+# Ordnerpfad abfragen und daraus den vollständigen Dateipfad erstellen
+folder_path = input("Bitte den Ordnerpfad angeben, in dem sich Ihre ISIN-Liste befindet: ").strip()
+file_path = os.path.join(folder_path, "ISIN-Liste.xlsx")
+if not os.path.exists(file_path):
+    raise FileNotFoundError(f"Die Datei '{file_path}' wurde nicht gefunden!")
 
-# ISIN/WKN und Unternehmensnamen in ein Dictionary umwandeln
-isin_wkn = dict(zip(df['Unternehmen'], df['ISIN/WKN']))
+# Einlesen der ISIN-Liste (Erwartet: Reiter 'ISIN-Liste' mit den Spalten 'Unternehmen' und 'ISIN')
+try:
+    isin_df = pd.read_excel(file_path, sheet_name="ISIN-Liste")
+except Exception as e:
+    raise Exception(
+        "Fehler beim Einlesen der Excel-Datei. Stellen Sie sicher, dass ein Reiter 'ISIN-Liste' existiert.") from e
 
-# Heute Datum
-end_date = datetime.now().strftime('%Y-%m-%d')
+if not set(['Unternehmen', 'ISIN']).issubset(isin_df.columns):
+    raise Exception("Die Excel-Datei muss die Spalten 'Unternehmen' und 'ISIN' enthalten.")
 
-# Startdatum vor 10 Jahren
-start_date = (datetime.now() - pd.DateOffset(years=10)).strftime('%Y-%m-%d')
+# Anzahl der Jahre, für die historische Daten abgerufen werden sollen
+try:
+    years = float(input("Wie viele Jahre sollen zurückgeschaut werden? (z.B. 5): "))
+except Exception as e:
+    raise Exception("Bitte geben Sie eine gültige Zahl für die Jahre ein.")
 
-# Daten abrufen und verarbeiten
-all_data = pd.DataFrame()
+# Startdatum (letzter Tag des Betrachtungszeitraums)
+start_date_str = input("Bitte geben Sie das Startdatum ein (JJJJ-MM-TT): ").strip()
+try:
+    start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+except Exception as e:
+    raise Exception("Bitte geben Sie ein gültiges Datum im Format JJJJ-MM-TT ein.")
 
-for name, identifier in isin_wkn.items():
+# Bestimmen des Anfangsdatums (Startdatum minus die angegebene Anzahl an Jahren)
+begin_dt = start_dt - relativedelta(years=years)
+
+# Vollständigkeitskriterium (in %)
+try:
+    completeness_percent = float(
+        input("Wie viel % der Zeitreihe müssen vollständig vorhanden sein? (z.B. 100 für 100%): "))
+except Exception as e:
+    raise Exception("Bitte geben Sie einen gültigen Prozentwert ein.")
+
+# Zielrendite (in %; annualisiert)
+try:
+    target_return_pct = float(input("Bitte geben Sie die Zielrendite in % ein (annualisiert, z.B. 8): "))
+except Exception as e:
+    raise Exception("Bitte geben Sie einen gültigen Prozentwert für die Zielrendite ein.")
+# Umrechnung in Dezimal (annualisierte Zielrendite)
+target_return = target_return_pct / 100.0
+# Für die Optimierung wird die tägliche Zielrendite benötigt (angenommen 252 Handelstage pro Jahr)
+daily_target = target_return / 252
+
+# Risikofreier Zinssatz (annualisiert in %)
+try:
+    risk_free_pct = float(input("Bitte geben Sie den risikofreien Zinssatz in % ein (annualisiert, z.B. 3): "))
+except Exception as e:
+    raise Exception("Bitte geben Sie einen gültigen Prozentwert für den risikofreien Zinssatz ein.")
+# Umrechnung in einen täglichen risikofreien Zinssatz (angenommen 252 Handelstage pro Jahr)
+risk_free_daily = (risk_free_pct / 100.0) / 252
+
+# Mindestanzahl an Aktien im Portfolio
+try:
+    min_stocks = int(input("Bitte geben Sie die Mindestanzahl an Aktien im Portfolio ein: "))
+except Exception as e:
+    raise Exception("Bitte geben Sie eine gültige Ganzzahl für die Mindestanzahl an Aktien ein.")
+
+print("\nStarte den Abruf der historischen Kurse ...\n")
+
+# 2. Laden der historischen Kursdaten und Berechnung der Log-Renditen
+
+# Bestimme die erwartete Anzahl an Handelstagen im Zeitraum (Business Days)
+expected_days = len(pd.date_range(start=begin_dt, end=start_dt, freq='B'))
+print(f"Erwartete Anzahl an Handelstagen im Zeitraum: {expected_days}")
+
+# Dictionaries zum Speichern der einzelnen Rendite-Reihen und der gültigen ISINs
+returns_dict = {}
+valid_assets = []  # Liste von Dictionaries mit 'ISIN' und 'Unternehmen'
+
+for idx, row in isin_df.iterrows():
+    isin = str(row['ISIN']).strip()
+    company = str(row['Unternehmen']).strip()
+    print(f"Verarbeite {isin} ({company}) ...")
     try:
-        # Ticker-Symbol über ISIN/WKN abrufen
-        ticker_symbol = yf.Ticker(identifier).info['symbol']
-
-        # Historische Daten abrufen
-        data = yf.download(ticker_symbol, start=start_date, end=end_date)
-
-        # Nur den Adjusted Close Preis behalten
-        data = data[['Adj Close']].rename(columns={'Adj Close': name})
-
-        # Stetige Tagesrendite berechnen
-        data[name] = np.log(data[name] / data[name].shift(1))
-
-        # Daten zum DataFrame hinzufügen
-        all_data = pd.concat([all_data, data[name]], axis=1)
+        # Abruf der historischen Kursdaten (hier: tägliche Daten; wir nutzen 'Adj Close', falls vorhanden)
+        data = yf.download(isin, start=begin_dt.strftime("%Y-%m-%d"), end=start_dt.strftime("%Y-%m-%d"), progress=False)
     except Exception as e:
-        print(f"Fehler beim Abrufen der Daten für {name} mit {identifier}: {e}")
+        print(f"  Fehler beim Abruf für {isin}: {e}")
+        continue
 
-# Zeitzoneninformationen aus dem Index entfernen
-if isinstance(all_data.index.dtype, pd.DatetimeTZDtype):
-    all_data.index = all_data.index.tz_localize(None)
+    if data.empty:
+        print(f"  Keine Daten für {isin} ({company}) gefunden.")
+        continue
 
-# Berechnung der Kovarianz- und Korrelationsmatrix
-cov_matrix = all_data.cov()
-corr_matrix = all_data.corr()
+    if 'Adj Close' in data.columns:
+        prices = data['Adj Close']
+    elif 'Close' in data.columns:
+        prices = data['Close']
+    else:
+        print(f"  Keine Schlusskurs-Daten für {isin} ({company}) gefunden.")
+        continue
 
-# Ergebnisse in eine Excel-Datei schreiben
-output_file_path = r'PFAD ZUR OUTPUT-TABELLE\00_Stetige_Tagesrenditen_und_Matrizen.xlsx'
+    # Prüfen, ob genügend Tage (laut Vollständigkeitskriterium) vorhanden sind
+    available_days = prices.dropna().shape[0]
+    if available_days < (completeness_percent / 100.0) * expected_days:
+        print(
+            f"  {isin} ({company}) erfüllt nicht das Vollständigkeitskriterium: {available_days} von {expected_days} Tagen vorhanden.")
+        continue
 
-with pd.ExcelWriter(output_file_path) as writer:
-    # Stetige Tagesrenditen in den Reiter "Log-Rendite" schreiben
-    all_data.to_excel(writer, sheet_name="Log-Rendite", index=True)
+    # Berechnung der stetigen (Log-)Renditen
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+    if log_returns.empty:
+        print(f"  Für {isin} ({company}) konnten keine Log-Renditen berechnet werden.")
+        continue
 
-    # Kovarianzmatrix in den Reiter "Kovarianzmatrix" schreiben
-    cov_matrix.to_excel(writer, sheet_name="Kovarianzmatrix", index=True)
+    returns_dict[isin] = log_returns
+    valid_assets.append({'ISIN': isin, 'Unternehmen': company})
 
-    # Korrelationsmatrix in den Reiter "Korrelationsmatrix" schreiben
-    corr_matrix.to_excel(writer, sheet_name="Korrelationsmatrix", index=True)
+# Prüfen, ob mindestens min_stocks Assets vorliegen
+if len(valid_assets) < min_stocks:
+    raise Exception(
+        f"Es wurden nur {len(valid_assets)} Assets gefunden, was kleiner als die Mindestanzahl von {min_stocks} ist.")
 
-print(f'Stetige Tagesrenditen, Kovarianzmatrix und Korrelationsmatrix erfolgreich gespeichert in {output_file_path}')
+print(f"\nEs konnten {len(valid_assets)} Assets weiterverarbeitet werden.\n")
+
+# 3. Vereinheitlichen der Rendite-Zeitreihen (nur Tage, an denen alle Assets Daten haben)
+# Hier verwenden wir den inner join, sodass nur das Schnittmengen-Datum beibehalten wird.
+returns_df = pd.concat(returns_dict, axis=1, join='inner')
+# Da pd.concat mit einem Dictionary einen MultiIndex bei den Spalten erzeugt, vereinfachen wir:
+returns_df.columns = returns_df.columns.get_level_values(0)
+returns_df.sort_index(inplace=True)
+
+# Entfernen von Zeitzoneninformationen (Excel unterstützt keine Datetimes mit Timezone)
+if returns_df.index.tz is not None:
+    returns_df.index = returns_df.index.tz_localize(None)
+
+# 4. Berechnung der Varianz-Kovarianzmatrix und der Korrelationsmatrix
+cov_matrix = returns_df.cov()
+corr_matrix = returns_df.corr()
+
+# 5. Portfolio-Optimierung
+# Berechne den durchschnittlichen (täglichen) Ertrag für jedes Asset
+mean_returns = returns_df.mean()
+num_assets = len(mean_returns)
+initial_guess = np.repeat(1 / num_assets, num_assets)
+bounds = tuple((0, 1) for _ in range(num_assets))
+constraints_sum = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+
+
+# a) Minimum-Varianz-Portfolio (MVP): Minimierung der Portfolio-Varianz
+def portfolio_variance(weights):
+    return np.dot(weights.T, np.dot(cov_matrix, weights))
+
+
+mvp_solution = sco.minimize(portfolio_variance, initial_guess, method='SLSQP', bounds=bounds,
+                            constraints=constraints_sum)
+if not mvp_solution.success:
+    raise Exception("Optimierung des Minimum-Varianz-Portfolios ist fehlgeschlagen.")
+mvp_weights = mvp_solution.x
+
+
+# b) Tangentialportfolio: Maximierung der Sharpe-Ratio (unter Berücksichtigung des risikofreien Zinssatzes)
+def neg_sharpe_ratio(weights):
+    port_return = np.dot(weights, mean_returns)
+    port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    # Sharpe-Ratio: (Rendite - risikofreier Zinssatz) / Volatilität
+    return - (port_return - risk_free_daily) / port_vol
+
+
+tan_solution = sco.minimize(neg_sharpe_ratio, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints_sum)
+if not tan_solution.success:
+    raise Exception("Optimierung des Tangentialportfolios ist fehlgeschlagen.")
+tan_weights = tan_solution.x
+
+# c) Targetportfolio: Minimierung der Volatilität bei Erreichen der vorgegebenen täglichen Zielrendite
+constraints_target = (
+    {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
+    {'type': 'eq', 'fun': lambda w: np.dot(w, mean_returns) - daily_target}
+)
+target_solution = sco.minimize(lambda w: np.sqrt(np.dot(w.T, np.dot(cov_matrix, w))),
+                               initial_guess, method='SLSQP', bounds=bounds, constraints=constraints_target)
+if not target_solution.success:
+    raise Exception(
+        "Optimierung des Targetportfolios ist fehlgeschlagen. Prüfen Sie, ob die Zielrendite realistisch ist.")
+target_weights = target_solution.x
+
+
+# Prüfen, ob in den optimierten Portfolios mindestens min_stocks Positionen (mit Gewicht > 1e-4) enthalten sind
+def count_positions(weights, threshold=1e-4):
+    return np.sum(weights > threshold)
+
+
+for port_name, weights in zip(["Minimum-Varianz", "Tangential", "Target"],
+                              [mvp_weights, tan_weights, target_weights]):
+    num_positions = count_positions(weights)
+    if num_positions < min_stocks:
+        print(f"Warnung: Das {port_name}-Portfolio enthält nur {num_positions} Position(en), "
+              f"weniger als die gewünschte Mindestanzahl von {min_stocks} Aktien.")
+
+
+# Annualisierung der Portfoliorendite und -volatilität (angenommen 252 Handelstage pro Jahr)
+def annualize_return(weights):
+    daily_ret = np.dot(weights, mean_returns)
+    return daily_ret * 252
+
+
+def annualize_vol(weights):
+    daily_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    return daily_vol * np.sqrt(252)
+
+
+mvp_ann_return = annualize_return(mvp_weights)
+mvp_ann_vol = annualize_vol(mvp_weights)
+
+tan_ann_return = annualize_return(tan_weights)
+tan_ann_vol = annualize_vol(tan_weights)
+
+target_ann_return = annualize_return(target_weights)
+target_ann_vol = annualize_vol(target_weights)
+
+# Erstellen einer Übersichtstabelle der Portfolio-Performance
+summary_df = pd.DataFrame({
+    'Portfolio': ['Minimum-Varianz', 'Tangential', 'Target'],
+    'Rendite (annualisiert, in %)': [mvp_ann_return * 100, tan_ann_return * 100, target_ann_return * 100],
+    'Volatilität (annualisiert, in %)': [mvp_ann_vol * 100, tan_ann_vol * 100, target_ann_vol * 100]
+})
+
+# 6. Speichern aller Ergebnisse in einer Excel-Arbeitsmappe im gleichen Ordner wie die ISIN-Liste
+output_file = os.path.join(folder_path, "Portfolio_Optimierung.xlsx")
+with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    # Blatt 1: ISIN-Liste (nur die gültigen Assets)
+    valid_assets_df = pd.DataFrame(valid_assets)
+    valid_assets_df.to_excel(writer, sheet_name="ISIN-Liste", index=False)
+
+    # Blatt 2: Log-Renditen (Zeitreihe)
+    returns_df.to_excel(writer, sheet_name="Log-Renditen")
+
+    # Blatt 3: Varianz-Kovarianzmatrix
+    cov_matrix.to_excel(writer, sheet_name="Varianz-Kovarianzmatrix")
+
+    # Blatt 4: Korrelationsmatrix
+    corr_matrix.to_excel(writer, sheet_name="Korrelationsmatrix")
+
+    # Blatt 5: Optimierungsergebnisse (Portfolioanteile)
+    opt_results_df = pd.DataFrame({
+        'ISIN': valid_assets_df['ISIN'],
+        'Unternehmen': valid_assets_df['Unternehmen'],
+        'MVP Gewicht': mvp_weights,
+        'Tangential Gewicht': tan_weights,
+        'Target Gewicht': target_weights
+    })
+    opt_results_df.to_excel(writer, sheet_name="Optimierung", index=False)
+
+    # Blatt 6: Portfolio Performance
+    summary_df.to_excel(writer, sheet_name="Portfolio Performance", index=False)
+
+print(f"\nDie Ergebnisse wurden in der Excel-Datei '{output_file}' gespeichert.\n")
+
+# 7. Ausgabe der Portfolio-Performance als Tabelle in der Konsole
+print("=== Portfolio Performance (annualisiert) ===")
+print(summary_df.to_string(index=False))
