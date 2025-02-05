@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# Im Pfad muss eine Exceltabelle mit den ISINs liegen (ISIN-Liste) - dort hat die Spalte A die Überschrift "Unternehmen" und die Spalte B die Überschrift "ISIN"
 """
 Portfoliooptimierung anhand historischer Log-Renditen (mit Yahoo Finance)
 """
